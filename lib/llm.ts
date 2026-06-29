@@ -1,4 +1,5 @@
 import { createReminder, listReminders } from "./reminders";
+import { listEvents, createEvent } from "./calendar";
 
 const GEMINI_MODEL = "gemini-2.5-flash";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
@@ -25,6 +26,31 @@ const tools = [
         name: "list_reminders",
         description: "List the user's upcoming, unsent reminders.",
         parameters: { type: "object", properties: {} },
+      },
+      {
+        name: "list_events",
+        description: "List upcoming events from Miles's Apple Calendar.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "How many days ahead to look (default: 7)" },
+          },
+        },
+      },
+      {
+        name: "create_event",
+        description: "Create a new event in Miles's Apple Calendar.",
+        parameters: {
+          type: "object",
+          properties: {
+            summary: { type: "string", description: "Event title" },
+            start: { type: "string", description: "Start time as ISO 8601 with timezone offset" },
+            end: { type: "string", description: "End time as ISO 8601 with timezone offset" },
+            description: { type: "string", description: "Optional notes for the event" },
+            location: { type: "string", description: "Optional location" },
+          },
+          required: ["summary", "start", "end"],
+        },
       },
     ],
   },
@@ -56,6 +82,20 @@ async function runTool(chatId: number, name: string, args: Record<string, unknow
   }
   if (name === "list_reminders") {
     return { reminders: await listReminders(chatId) };
+  }
+  if (name === "list_events") {
+    const events = await listEvents((args.days as number) ?? 7);
+    return { events };
+  }
+  if (name === "create_event") {
+    await createEvent(
+      args.summary as string,
+      args.start as string,
+      args.end as string,
+      args.description as string | undefined,
+      args.location as string | undefined
+    );
+    return { status: "created", summary: args.summary, start: args.start };
   }
   return { error: `unknown tool ${name}` };
 }
