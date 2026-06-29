@@ -1,36 +1,45 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RemindMe
 
-## Getting Started
+A personal AI agent that lives in Telegram. It has long-term memory, responds using Google Gemini, and proactively sends daily check-ins via a cron job.
 
-First, run the development server:
+## Stack
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- **Next.js** (App Router) on Vercel - webhook endpoint + cron
+- **Supabase** (Postgres + pgvector) - memory storage
+- **Google Gemini** (`gemini-2.5-flash`, free tier) - reasoning and responses
+- **Telegram Bot API** - webhook-based messaging interface
+- **Vercel Cron** - proactive scheduled messages
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## How it works
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. You message the bot on Telegram.
+2. `POST /api/telegram` receives the webhook, retrieves recent memory, calls Gemini, replies, and stores the exchange in Supabase.
+3. `GET /api/cron/daily` runs each morning, summarizes recent context, and sends a proactive check-in.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Setup
 
-## Learn More
+1. Create a Supabase project and run `supabase/migrations/001_init.sql`.
+2. Create a Telegram bot via [@BotFather](https://t.me/BotFather) and a Gemini key at [AI Studio](https://aistudio.google.com/apikey).
+3. Set the environment variables (see below) locally in `.env.local` and on Vercel.
+4. Deploy: `vercel deploy --prod`.
+5. Register the webhook:
+   ```bash
+   curl "https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<your-app>.vercel.app/api/telegram"
+   ```
 
-To learn more about Next.js, take a look at the following resources:
+## Environment variables
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+| Variable | Description |
+|----------|-------------|
+| `TELEGRAM_BOT_TOKEN` | Bot token from @BotFather |
+| `TELEGRAM_CHAT_ID` | Your personal chat ID (from @userinfobot) |
+| `GEMINI_API_KEY` | Google Gemini API key |
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service role key |
+| `CRON_SECRET` | Random string protecting the cron endpoint |
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Roadmap
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- Semantic memory via Gemini embeddings (currently recency-based)
+- Tool use: GitHub, calendar, Obsidian
+- Open-source "deploy your own" flow
