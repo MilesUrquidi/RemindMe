@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { parseUpdate, sendMessage } from "@/lib/telegram";
 import { searchMemories, storeMemory } from "@/lib/memory";
-import { chat } from "@/lib/claude";
+import { chat } from "@/lib/llm";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();

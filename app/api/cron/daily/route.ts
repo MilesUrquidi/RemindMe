@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { searchMemories } from "@/lib/memory";
-import { dailySummary } from "@/lib/claude";
+import { dailySummary } from "@/lib/llm";
 import { sendMessage } from "@/lib/telegram";
 
-export async function POST(req: NextRequest) {
-  const secret = req.headers.get("x-cron-secret");
-  if (secret !== process.env.CRON_SECRET) {
+// Vercel Cron invokes this with GET and an `Authorization: Bearer <CRON_SECRET>` header.
+export async function GET(req: NextRequest) {
+  const auth = req.headers.get("authorization");
+  if (auth !== `Bearer ${process.env.CRON_SECRET}`) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
