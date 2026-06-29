@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
   const { chatId, text } = update;
 
   const memories = await searchMemories(text);
-  const reply = await chat(text, memories);
+  const reply = await chat(chatId, text, memories);
 
   await Promise.all([
     storeMemory("user", text),
