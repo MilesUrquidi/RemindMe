@@ -5,6 +5,8 @@ const TELEGRAM_API = `https://api.telegram.org/bot${process.env.TELEGRAM_BOT_TOK
 // so convert lists to bullet lines and strip every unsupported tag before sending.
 function sanitizeTelegramHtml(text: string): string {
   return text
+    .replace(/^[ \t]*[*-][ \t]+/gm, "• ") // markdown bullets → •
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>") // markdown bold → <b>
     .replace(/[ \t]*<li>\s*/gi, "• ")
     .replace(/\s*<\/li>/gi, "\n")
     .replace(/\s*<\/?(ul|ol|p|div)[^>]*>\s*/gi, "\n")
