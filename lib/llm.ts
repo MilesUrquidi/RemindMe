@@ -1,4 +1,3 @@
-import { createReminder, listReminders } from "./reminders";
 import { listEvents, createEvent } from "./calendar";
 
 const GEMINI_MODEL = "gemini-2.5-flash";
@@ -10,23 +9,6 @@ const USER_TIMEZONE = "America/Los_Angeles";
 const tools = [
   {
     functionDeclarations: [
-      {
-        name: "create_reminder",
-        description: "Schedule a reminder. The bot will text the user at the given time.",
-        parameters: {
-          type: "object",
-          properties: {
-            content: { type: "string", description: "What to remind the user about" },
-            due_at: { type: "string", description: "When to fire, as an ISO 8601 timestamp with timezone offset" },
-          },
-          required: ["content", "due_at"],
-        },
-      },
-      {
-        name: "list_reminders",
-        description: "List the user's upcoming, unsent reminders.",
-        parameters: { type: "object", properties: {} },
-      },
       {
         name: "list_events",
         description: "List upcoming events from Miles's Apple Calendar.",
@@ -124,14 +106,7 @@ function formatEventTime(start: string, end: string): string {
     : `${dayPart}, ${startClock}`;
 }
 
-async function runTool(chatId: number, name: string, args: Record<string, unknown>): Promise<object> {
-  if (name === "create_reminder") {
-    await createReminder(chatId, args.content as string, args.due_at as string);
-    return { status: "scheduled", content: args.content, due_at: args.due_at };
-  }
-  if (name === "list_reminders") {
-    return { reminders: await listReminders(chatId) };
-  }
+async function runTool(name: string, args: Record<string, unknown>): Promise<object> {
   if (name === "list_events") {
     const events = await listEvents((args.days as number) ?? 7);
     return {
@@ -184,7 +159,7 @@ export async function chat(
     `## Formatting\n` +
     `Replies go to Telegram with HTML parse mode. No markdown, no asterisks. ` +
     `The only allowed tags are <b>, <i>, and <code>. Escape literal &, <, > as &amp; &lt; &gt;. ` +
-    `When listing calendar events or reminders, group by day with a bold day header, ` +
+    `When listing calendar events, group by day with a bold day header, ` +
     `one item per line showing both start and end time, and a blank line between days. Example:\n` +
     `📅 <b>Tue, Jul 7</b>\n` +
     `• 9:00 AM - 5:00 PM: Work\n` +
@@ -193,8 +168,8 @@ export async function chat(
     `📅 <b>Wed, Jul 8</b>\n` +
     `• 2:00 PM - 4:00 PM: CodePath session\n` +
     `Never compute weekdays or times yourself - use the pre-computed "when" field from tool results verbatim.\n\n` +
-    `The current time is ${now} (${USER_TIMEZONE}). When Miles asks to be reminded of something, call create_reminder ` +
-    `with an absolute ISO 8601 due_at in his timezone. Resolve relative times like "in 10 minutes" or "tomorrow at 9am" ` +
+    `The current time is ${now} (${USER_TIMEZONE}). When Miles asks to schedule something, call create_event ` +
+    `with absolute ISO 8601 times in his timezone. Resolve relative times like "tomorrow at 9am" ` +
     `against the current time above.${contextBlock}`;
 
   const contents: Part[] = [{ role: "user", parts: [{ text: userMessage }] }];
@@ -212,7 +187,7 @@ export async function chat(
       return text ?? "(no response)";
     }
 
-    const result = await runTool(chatId, fnCall.name, fnCall.args ?? {});
+    const result = await runTool(fnCall.name, fnCall.args ?? {});
     contents.push(content);
     contents.push({
       role: "user",
