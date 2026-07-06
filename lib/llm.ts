@@ -1,7 +1,9 @@
 import { listEvents, createEvent } from "./calendar";
+import { recentCommits, openItems } from "./github";
 
-const GEMINI_MODEL = "gemini-2.5-flash";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+// Free-tier quotas are per model per day, so a rate-limited primary
+// can fall back to a model with its own separate quota bucket.
+const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
 const USER_TIMEZONE = "America/Los_Angeles";
 
@@ -34,6 +36,21 @@ const tools = [
           required: ["summary", "start", "end"],
         },
       },
+      {
+        name: "list_recent_commits",
+        description: "List Miles's recent GitHub commits across his repos. Use for questions like 'what did I ship this week'.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "How many days back to look (default: 7)" },
+          },
+        },
+      },
+      {
+        name: "list_open_github_items",
+        description: "List open issues and pull requests across Miles's GitHub repos.",
+        parameters: { type: "object", properties: {} },
+      },
     ],
   },
 ];
@@ -41,20 +58,35 @@ const tools = [
 type Part = Record<string, unknown>;
 
 async function callGemini(systemPrompt: string, contents: Part[]): Promise<Part> {
-  const res = await fetch(`${GEMINI_URL}?key=${process.env.GEMINI_API_KEY}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents,
-      tools,
-    }),
-  });
+  let lastError: Error | null = null;
 
-  if (!res.ok) throw new Error(`Gemini ${res.status}: ${await res.text()}`);
+  for (const model of GEMINI_MODELS) {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents,
+          tools,
+        }),
+      }
+    );
 
-  const data = await res.json();
-  return data?.candidates?.[0]?.content ?? { parts: [{ text: "(no response)" }] };
+    if (res.ok) {
+      const data = await res.json();
+      return data?.candidates?.[0]?.content ?? { parts: [{ text: "(no response)" }] };
+    }
+
+    lastError = new Error(`Gemini ${model} ${res.status}: ${await res.text()}`);
+    // Quota exhaustion (429) and transient overload (503) fall through to the
+    // next model; real errors surface immediately.
+    if (res.status !== 429 && res.status !== 503) throw lastError;
+    console.warn(`${model} unavailable (${res.status}), trying next model`);
+  }
+
+  throw lastError ?? new Error("no Gemini models configured");
 }
 
 // Models are unreliable at deriving weekdays from dates, so compute them in code
@@ -124,6 +156,12 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
     );
     return { status: "created", summary: args.summary, start: args.start };
   }
+  if (name === "list_recent_commits") {
+    return { commits: await recentCommits((args.days as number) ?? 7) };
+  }
+  if (name === "list_open_github_items") {
+    return { items: await openItems() };
+  }
   return { error: `unknown tool ${name}` };
 }
 
@@ -149,9 +187,9 @@ export async function chat(
     `You are RemindMe, Miles's personal AI assistant living in his Telegram.\n\n` +
     `## Who Miles is\n` +
     `Miles Urquidi is a software engineering student at UC Irvine (UCI). ` +
-    `He is building ZotDeals, a deal-sharing platform for UCI students, live at zotdeals.me. ` +
     `He prepares for SWE interviews through CodePath and MLT and practices LeetCode regularly. ` +
-    `His goals: land a strong SWE internship, grow ZotDeals to a large user base, become a strong engineer.\n\n` +
+    `He works on personal coding projects and goes to the gym. ` +
+    `His goals: land a strong SWE internship, stay consistent with the gym and his projects, become a strong engineer.\n\n` +
     `## Your role\n` +
     `You are a full general-purpose assistant. Answer any question from your own knowledge - ` +
     `coding help, LeetCode problems, system design, interview prep, career advice, explanations, brainstorming, anything. ` +
