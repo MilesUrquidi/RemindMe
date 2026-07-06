@@ -94,33 +94,43 @@ const tools = [
 
 type Part = Record<string, unknown>;
 
-async function callGemini(systemPrompt: string, contents: Part[]): Promise<Part> {
+async function callGemini(
+  systemPrompt: string,
+  contents: Part[],
+  withTools = true
+): Promise<Part> {
   let lastError: Error | null = null;
 
-  for (const model of GEMINI_MODELS) {
-    const res = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          systemInstruction: { parts: [{ text: systemPrompt }] },
-          contents,
-          tools,
-        }),
+  // Two passes over the model list: 503s are transient overload spikes,
+  // so a short backoff before the second sweep usually recovers.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0) await new Promise((r) => setTimeout(r, 3000));
+
+    for (const model of GEMINI_MODELS) {
+      const res = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: systemPrompt }] },
+            contents,
+            ...(withTools ? { tools } : {}),
+          }),
+        }
+      );
+
+      if (res.ok) {
+        const data = await res.json();
+        return data?.candidates?.[0]?.content ?? { parts: [{ text: "(no response)" }] };
       }
-    );
 
-    if (res.ok) {
-      const data = await res.json();
-      return data?.candidates?.[0]?.content ?? { parts: [{ text: "(no response)" }] };
+      lastError = new Error(`Gemini ${model} ${res.status}: ${await res.text()}`);
+      // Quota exhaustion (429) and transient overload (503) fall through to the
+      // next model; real errors surface immediately.
+      if (res.status !== 429 && res.status !== 503) throw lastError;
+      console.warn(`${model} unavailable (${res.status}), trying next model`);
     }
-
-    lastError = new Error(`Gemini ${model} ${res.status}: ${await res.text()}`);
-    // Quota exhaustion (429) and transient overload (503) fall through to the
-    // next model; real errors surface immediately.
-    if (res.status !== 429 && res.status !== 503) throw lastError;
-    console.warn(`${model} unavailable (${res.status}), trying next model`);
   }
 
   throw lastError ?? new Error("no Gemini models configured");
@@ -298,20 +308,61 @@ export async function chat(
 export async function dailySummary(
   memories: { role: string; content: string }[]
 ): Promise<string> {
+  // Gather everything in code so the brief is one deterministic compose call.
+  // Each source degrades to a note instead of killing the whole brief.
+  const [events, weather, habits] = await Promise.all([
+    listEvents(0).catch(() => "unavailable" as const),
+    getWeather(1).catch(() => "unavailable" as const),
+    habitSummary(7).catch(() => "unavailable" as const),
+  ]);
+
+  const eventsBlock =
+    events === "unavailable"
+      ? "calendar unavailable"
+      : events.length
+        ? JSON.stringify(events.map((e) => ({ ...e, when: formatEventTime(e.start, e.end) })))
+        : "no events today";
   const historyBlock = memories.map((m) => `${m.role}: ${m.content}`).join("\n");
 
+  const now = new Date().toLocaleString("en-US", {
+    timeZone: USER_TIMEZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
+  const systemPrompt =
+    `You are RemindMe, Miles's personal AI assistant. Compose his morning check-in text for ${now}.\n\n` +
+    `Structure, in this order:\n` +
+    `1. One short friendly greeting line with an emoji.\n` +
+    `2. 📅 <b>Today</b> - his calendar events, one per line ("• 9:00 AM - 5:00 PM: Work"), using the pre-computed ` +
+    `"when" fields verbatim. If there are no events, instead suggest 1-2 concrete things based on his habit data ` +
+    `(e.g. gym if he hasn't been recently) and anything he said he wants to do in the recent conversation history.\n` +
+    `3. Weather - pick a header emoji matching the conditions (☀️ 🌤 ☁️ 🌧 ⛈ 🌫), e.g. "☀️ <b>Weather</b>". ` +
+    `Then two lines: current temp + conditions, and high/low + rain chance.\n` +
+    `4. 💪 <b>Habits</b> - only if habit data exists: one line per habit with days active this week and when last done. ` +
+    `One short honest nudge if something is slipping, brief praise if consistent.\n` +
+    `5. Optional single closing line - only if the recent history has something worth following up on today.\n\n` +
+    `Formatting: Telegram HTML. Only <b>, <i>, <code> tags. No markdown, no asterisks, no <ul>/<li>. ` +
+    `Blank line between sections. Keep the whole thing compact - it's a morning text, not a report.`;
+
   const content = await callGemini(
-    "You are Miles's personal AI assistant, RemindMe.",
+    systemPrompt,
     [
       {
         role: "user",
         parts: [
           {
-            text: `Based on our recent conversations, send me a brief morning check-in. Mention anything I should follow up on or remember today. Keep it short and conversational.\n\nRecent history:\n${historyBlock}`,
+            text:
+              `Today's calendar: ${eventsBlock}\n\n` +
+              `Weather data: ${JSON.stringify(weather)}\n\n` +
+              `Habit summary (last 7 days): ${JSON.stringify(habits)}\n\n` +
+              `Recent conversation history:\n${historyBlock}`,
           },
         ],
       },
-    ]
+    ],
+    false
   );
 
   const parts = (content.parts as Part[]) ?? [];

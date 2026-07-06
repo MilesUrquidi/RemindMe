@@ -80,14 +80,14 @@ export async function getWeather(days = 1, locationName?: string) {
   return {
     place: loc.place,
     now: {
-      temp_f: data.current.temperature_2m,
-      feels_like_f: data.current.apparent_temperature,
+      temp_f: Math.round(data.current.temperature_2m),
+      feels_like_f: Math.round(data.current.apparent_temperature),
       conditions: describe(data.current.weather_code),
     },
     daily: data.daily.time.map((date: string, i: number) => ({
       date,
-      high_f: data.daily.temperature_2m_max[i],
-      low_f: data.daily.temperature_2m_min[i],
+      high_f: Math.round(data.daily.temperature_2m_max[i]),
+      low_f: Math.round(data.daily.temperature_2m_min[i]),
       rain_chance_pct: data.daily.precipitation_probability_max[i],
       conditions: describe(data.daily.weather_code[i]),
     })),

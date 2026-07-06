@@ -43,7 +43,7 @@ export async function searchMemories(
   limit = 5
 ): Promise<{ role: string; content: string }[]> {
   const [embedding, recentRes] = await Promise.all([
-    embed(query),
+    query.trim() ? embed(query) : Promise.resolve(null),
     supabase
       .from("memories")
       .select("role, content")
