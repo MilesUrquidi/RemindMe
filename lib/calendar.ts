@@ -69,23 +69,28 @@ export async function listEvents(days = 7): Promise<CalendarEvent[]> {
   const client = await getClient();
   const calendars = await client.fetchCalendars();
 
-  const now = new Date();
-  const end = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+  // iCloud ignores CalDAV time-range filters, so fetch all and filter client-side.
+  // Compare YYYY-MM-DD strings in LA time to avoid UTC conversion issues.
+  const tz = "America/Los_Angeles";
+  const fmt = (d: Date) => d.toLocaleDateString("en-CA", { timeZone: tz });
+  const today = fmt(new Date());
+  const cutoff = fmt(new Date(Date.now() + days * 24 * 60 * 60 * 1000));
 
   const events: CalendarEvent[] = [];
 
   for (const calendar of calendars) {
-    const objects = await client.fetchCalendarObjects({
-      calendar,
-      timeRange: { start: now.toISOString(), end: end.toISOString() },
-    });
+    const objects = await client.fetchCalendarObjects({ calendar });
 
     for (const obj of objects) {
       if (!obj.data) continue;
-      const veventMatch = obj.data.match(/BEGIN:VEVENT[\s\S]*?END:VEVENT/);
-      if (!veventMatch) continue;
-      const parsed = parseVEvent(veventMatch[0]);
-      if (parsed) events.push(parsed);
+      // One .ics can have multiple VEVENTs (recurring expansion)
+      const vevents = [...obj.data.matchAll(/BEGIN:VEVENT[\s\S]*?END:VEVENT/g)];
+      for (const [vevent] of vevents) {
+        const parsed = parseVEvent(vevent);
+        if (!parsed) continue;
+        const date = parsed.start.slice(0, 10);
+        if (date >= today && date <= cutoff) events.push(parsed);
+      }
     }
   }
 
