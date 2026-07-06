@@ -1,6 +1,7 @@
 import { listEvents, createEvent } from "./calendar";
 import { recentCommits, openItems } from "./github";
 import { getWeather } from "./weather";
+import { logHabit, habitSummary } from "./habits";
 
 // Free-tier quotas are per model per day, so a rate-limited primary
 // can fall back to a model with its own separate quota bucket.
@@ -51,6 +52,30 @@ const tools = [
         name: "list_open_github_items",
         description: "List open issues and pull requests across Miles's GitHub repos.",
         parameters: { type: "object", properties: {} },
+      },
+      {
+        name: "log_habit",
+        description:
+          "Log that Miles did a habit today. Call whenever he mentions completing gym, leetcode, or personal project work. Use canonical habit names: 'gym', 'leetcode', 'project'.",
+        parameters: {
+          type: "object",
+          properties: {
+            habit: { type: "string", description: "Habit name: gym, leetcode, project, or another short lowercase name" },
+            note: { type: "string", description: "Optional detail, e.g. 'push day' or 'worked on RemindMe'" },
+          },
+          required: ["habit"],
+        },
+      },
+      {
+        name: "get_habit_summary",
+        description:
+          "Get counts, active days, and last-done dates for Miles's habits. Use for 'how consistent have I been', streak questions, and accountability nudges.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "How many days back to look (default: 7)" },
+          },
+        },
       },
       {
         name: "get_weather",
@@ -174,6 +199,13 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
   if (name === "list_open_github_items") {
     return { items: await openItems() };
   }
+  if (name === "log_habit") {
+    await logHabit(args.habit as string, args.note as string | undefined);
+    return { status: "logged", habit: args.habit, note: args.note };
+  }
+  if (name === "get_habit_summary") {
+    return { habits: await habitSummary((args.days as number) ?? 7) };
+  }
   if (name === "get_weather") {
     return await getWeather(
       (args.days as number) ?? 1,
@@ -214,6 +246,9 @@ export async function chat(
     `Tools (calendar) are extras, not your limits: never refuse a question just because no tool covers it. ` +
     `Only say you can't help when you genuinely can't, e.g. live data no tool covers (news, stock prices). ` +
     `Beyond that, help Miles stay on track, remember things, and manage his calendar. ` +
+    `Hold him accountable on his habits (gym, leetcode, personal projects): when he mentions completing one, ` +
+    `log it with log_habit and acknowledge briefly. If he asks how he's doing, use get_habit_summary and be honest - ` +
+    `celebrate consistency, call out slumps without nagging. ` +
     `Be concise and direct - no unnecessary preamble. ` +
     `You know his history from past conversations.\n\n` +
     `## Formatting\n` +
