@@ -2,11 +2,26 @@ import { supabase } from "./supabase";
 
 const USER_TIMEZONE = "America/Los_Angeles";
 
-export async function logHabit(habit: string, note?: string) {
-  const { error } = await supabase
+export async function logHabit(habit: string, note?: string): Promise<"logged" | "already_logged_today"> {
+  const name = habit.toLowerCase().trim();
+
+  // One row per habit per LA-day: mentioning the same workout twice shouldn't inflate
+  // counts. Compare LA day-strings (server may run in UTC) over the last 24h of rows.
+  const toDay = (d: Date | string) =>
+    new Date(d).toLocaleDateString("en-CA", { timeZone: USER_TIMEZONE });
+  const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  const { data: recent, error: selErr } = await supabase
     .from("habit_logs")
-    .insert({ habit: habit.toLowerCase().trim(), note });
+    .select("logged_at")
+    .eq("habit", name)
+    .gte("logged_at", dayAgo);
+  if (selErr) throw new Error(`logHabit: ${selErr.message}`);
+  const today = toDay(new Date());
+  if ((recent ?? []).some((r) => toDay(r.logged_at) === today)) return "already_logged_today";
+
+  const { error } = await supabase.from("habit_logs").insert({ habit: name, note });
   if (error) throw new Error(`logHabit: ${error.message}`);
+  return "logged";
 }
 
 export interface HabitSummary {

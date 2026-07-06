@@ -2,6 +2,7 @@ import { listEvents, createEvent } from "./calendar";
 import { recentCommits, openItems } from "./github";
 import { getWeather } from "./weather";
 import { logHabit, habitSummary } from "./habits";
+import { saveJournal, recentJournal } from "./journal";
 
 // Free-tier quotas are per model per day, so a rate-limited primary
 // can fall back to a model with its own separate quota bucket.
@@ -70,6 +71,28 @@ const tools = [
         name: "get_habit_summary",
         description:
           "Get counts, active days, and last-done dates for Miles's habits. Use for 'how consistent have I been', streak questions, and accountability nudges.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "How many days back to look (default: 7)" },
+          },
+        },
+      },
+      {
+        name: "save_journal_entry",
+        description:
+          "Save a journal entry. Call when Miles reflects on his day - especially replies to the evening check-in - or explicitly asks to journal something. Save his reflection in his own words, lightly cleaned up.",
+        parameters: {
+          type: "object",
+          properties: {
+            content: { type: "string", description: "The journal entry text" },
+          },
+          required: ["content"],
+        },
+      },
+      {
+        name: "get_journal_entries",
+        description: "Get Miles's recent journal entries. Use when he asks what he journaled or how past days went.",
         parameters: {
           type: "object",
           properties: {
@@ -210,11 +233,18 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
     return { items: await openItems() };
   }
   if (name === "log_habit") {
-    await logHabit(args.habit as string, args.note as string | undefined);
-    return { status: "logged", habit: args.habit, note: args.note };
+    const status = await logHabit(args.habit as string, args.note as string | undefined);
+    return { status, habit: args.habit, note: args.note };
   }
   if (name === "get_habit_summary") {
     return { habits: await habitSummary((args.days as number) ?? 7) };
+  }
+  if (name === "save_journal_entry") {
+    await saveJournal(args.content as string);
+    return { status: "saved" };
+  }
+  if (name === "get_journal_entries") {
+    return { entries: await recentJournal((args.days as number) ?? 7) };
   }
   if (name === "get_weather") {
     return await getWeather(
@@ -259,6 +289,8 @@ export async function chat(
     `Hold him accountable on his habits (gym, leetcode, personal projects): when he mentions completing one, ` +
     `log it with log_habit and acknowledge briefly. If he asks how he's doing, use get_habit_summary and be honest - ` +
     `celebrate consistency, call out slumps without nagging. ` +
+    `When he reflects on how his day went (especially in the evening), save it with save_journal_entry in his own words, ` +
+    `and still log any habits he mentions. ` +
     `Be concise and direct - no unnecessary preamble. ` +
     `You know his history from past conversations.\n\n` +
     `## Formatting\n` +
@@ -358,6 +390,55 @@ export async function dailySummary(
               `Weather data: ${JSON.stringify(weather)}\n\n` +
               `Habit summary (last 7 days): ${JSON.stringify(habits)}\n\n` +
               `Recent conversation history:\n${historyBlock}`,
+          },
+        ],
+      },
+    ],
+    false
+  );
+
+  const parts = (content.parts as Part[]) ?? [];
+  return (parts.find((p) => p.text)?.text as string) ?? "(no response)";
+}
+
+export async function eveningSummary(): Promise<string> {
+  const [habits, commits, events] = await Promise.all([
+    habitSummary(1).catch(() => "unavailable" as const),
+    recentCommits(1).catch(() => "unavailable" as const),
+    listEvents(0).catch(() => "unavailable" as const),
+  ]);
+
+  const now = new Date().toLocaleString("en-US", {
+    timeZone: USER_TIMEZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
+  const systemPrompt =
+    `You are RemindMe, Miles's personal AI assistant. Compose his evening check-in text for ${now}.\n\n` +
+    `Structure:\n` +
+    `1. One short winding-down greeting line with an emoji (🌙 or similar).\n` +
+    `2. A compact recap of the day from the data: habits he logged, commits he shipped, events he had. ` +
+    `Only mention sections that have data - skip empty ones entirely. If he logged nothing and shipped nothing, ` +
+    `gently note the day looks quiet without guilt-tripping.\n` +
+    `3. End with ONE reflective question inviting him to journal - e.g. how the day went, ` +
+    `what he got done, whether he hit the gym. Vary the phrasing naturally; if the data already shows gym/leetcode ` +
+    `logged, don't ask about those - ask something the data doesn't show.\n\n` +
+    `Formatting: Telegram HTML. Only <b>, <i>, <code> tags. No markdown, no <ul>/<li>. ` +
+    `Use "• " for list lines and blank lines between sections. Keep it short - a nightly text, not a report.`;
+
+  const content = await callGemini(
+    systemPrompt,
+    [
+      {
+        role: "user",
+        parts: [
+          {
+            text:
+              `Habits logged today: ${JSON.stringify(habits)}\n\n` +
+              `Commits today: ${JSON.stringify(commits)}\n\n` +
+              `Today's calendar was: ${JSON.stringify(events)}`,
           },
         ],
       },
