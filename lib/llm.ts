@@ -1,5 +1,6 @@
 import { listEvents, createEvent } from "./calendar";
 import { recentCommits, openItems } from "./github";
+import { getWeather } from "./weather";
 
 // Free-tier quotas are per model per day, so a rate-limited primary
 // can fall back to a model with its own separate quota bucket.
@@ -50,6 +51,17 @@ const tools = [
         name: "list_open_github_items",
         description: "List open issues and pull requests across Miles's GitHub repos.",
         parameters: { type: "object", properties: {} },
+      },
+      {
+        name: "get_weather",
+        description: "Get current weather and forecast. Defaults to Irvine, CA.",
+        parameters: {
+          type: "object",
+          properties: {
+            days: { type: "number", description: "Forecast days, 1-7 (default: 1)" },
+            location: { type: "string", description: "City name if not Irvine, e.g. 'San Francisco'" },
+          },
+        },
       },
     ],
   },
@@ -162,6 +174,12 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
   if (name === "list_open_github_items") {
     return { items: await openItems() };
   }
+  if (name === "get_weather") {
+    return await getWeather(
+      (args.days as number) ?? 1,
+      args.location as string | undefined
+    );
+  }
   return { error: `unknown tool ${name}` };
 }
 
@@ -194,7 +212,7 @@ export async function chat(
     `You are a full general-purpose assistant. Answer any question from your own knowledge - ` +
     `coding help, LeetCode problems, system design, interview prep, career advice, explanations, brainstorming, anything. ` +
     `Tools (calendar) are extras, not your limits: never refuse a question just because no tool covers it. ` +
-    `Only say you can't help when you genuinely can't, e.g. live data you have no access to (weather, news, stock prices). ` +
+    `Only say you can't help when you genuinely can't, e.g. live data no tool covers (news, stock prices). ` +
     `Beyond that, help Miles stay on track, remember things, and manage his calendar. ` +
     `Be concise and direct - no unnecessary preamble. ` +
     `You know his history from past conversations.\n\n` +
