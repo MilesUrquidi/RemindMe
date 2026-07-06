@@ -75,6 +75,55 @@ async function callGemini(systemPrompt: string, contents: Part[]): Promise<Part>
   return data?.candidates?.[0]?.content ?? { parts: [{ text: "(no response)" }] };
 }
 
+// Models are unreliable at deriving weekdays from dates, so compute them in code
+// and hand the model a ready-to-use "when" string.
+function formatClock(iso: string): string | null {
+  if (!iso.includes("T")) return null;
+
+  if (iso.endsWith("Z")) {
+    // UTC timestamp: convert the clock to the user's timezone
+    return new Date(iso).toLocaleTimeString("en-US", {
+      hour: "numeric",
+      minute: "2-digit",
+      timeZone: USER_TIMEZONE,
+    });
+  }
+
+  // Floating local time: keep the clock as written
+  const [hh, mm] = iso.slice(11, 16).split(":").map(Number);
+  const h12 = hh % 12 === 0 ? 12 : hh % 12;
+  return `${h12}:${String(mm).padStart(2, "0")} ${hh < 12 ? "AM" : "PM"}`;
+}
+
+function formatEventTime(start: string, end: string): string {
+  let dayPart: string;
+  if (start.endsWith("Z")) {
+    // UTC timestamp: the date can shift when converted, so derive it in the user's timezone
+    dayPart = new Date(start).toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      timeZone: USER_TIMEZONE,
+    });
+  } else {
+    const [y, m, d] = start.slice(0, 10).split("-").map(Number);
+    dayPart = new Date(Date.UTC(y, m - 1, d)).toLocaleDateString("en-US", {
+      weekday: "short",
+      month: "short",
+      day: "numeric",
+      timeZone: "UTC",
+    });
+  }
+
+  const startClock = formatClock(start);
+  if (!startClock) return `${dayPart} (all day)`;
+
+  const endClock = end && end !== start ? formatClock(end) : null;
+  return endClock
+    ? `${dayPart}, ${startClock} - ${endClock}`
+    : `${dayPart}, ${startClock}`;
+}
+
 async function runTool(chatId: number, name: string, args: Record<string, unknown>): Promise<object> {
   if (name === "create_reminder") {
     await createReminder(chatId, args.content as string, args.due_at as string);
@@ -85,7 +134,10 @@ async function runTool(chatId: number, name: string, args: Record<string, unknow
   }
   if (name === "list_events") {
     const events = await listEvents((args.days as number) ?? 7);
-    return { events };
+    return {
+      events: events.map((e) => ({ ...e, when: formatEventTime(e.start, e.end) })),
+      note: "The 'when' field is pre-computed and correct - use it verbatim for dates, weekdays, and start/end times.",
+    };
   }
   if (name === "create_event") {
     await createEvent(
@@ -109,7 +161,15 @@ export async function chat(
     ? `\n\nRecent conversation history:\n${memories.map((m) => `${m.role}: ${m.content}`).join("\n")}`
     : "";
 
-  const now = new Date().toLocaleString("en-US", { timeZone: USER_TIMEZONE });
+  const now = new Date().toLocaleString("en-US", {
+    timeZone: USER_TIMEZONE,
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
   const systemPrompt =
     `You are RemindMe, Miles's personal AI assistant living in his Telegram.\n\n` +
     `## Who Miles is\n` +
@@ -121,6 +181,18 @@ export async function chat(
     `Help Miles stay on track, remember things, think through problems, and manage his calendar. ` +
     `Be concise and direct - no unnecessary preamble. ` +
     `You know his history from past conversations.\n\n` +
+    `## Formatting\n` +
+    `Replies go to Telegram with HTML parse mode. No markdown, no asterisks. ` +
+    `The only allowed tags are <b>, <i>, and <code>. Escape literal &, <, > as &amp; &lt; &gt;. ` +
+    `When listing calendar events or reminders, group by day with a bold day header, ` +
+    `one item per line showing both start and end time, and a blank line between days. Example:\n` +
+    `📅 <b>Tue, Jul 7</b>\n` +
+    `• 9:00 AM - 5:00 PM: Work\n` +
+    `• 6:30 PM - 7:30 PM: Gym\n` +
+    `\n` +
+    `📅 <b>Wed, Jul 8</b>\n` +
+    `• 2:00 PM - 4:00 PM: CodePath session\n` +
+    `Never compute weekdays or times yourself - use the pre-computed "when" field from tool results verbatim.\n\n` +
     `The current time is ${now} (${USER_TIMEZONE}). When Miles asks to be reminded of something, call create_reminder ` +
     `with an absolute ISO 8601 due_at in his timezone. Resolve relative times like "in 10 minutes" or "tomorrow at 9am" ` +
     `against the current time above.${contextBlock}`;
