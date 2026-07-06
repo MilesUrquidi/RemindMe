@@ -11,6 +11,12 @@ export async function POST(req: NextRequest) {
 
   const { chatId, text } = update;
 
+  // Personal bot: only respond to Miles. Silently drop anyone else so
+  // strangers can't burn quota or touch memory/habits/journal/tools.
+  if (String(chatId) !== process.env.TELEGRAM_CHAT_ID) {
+    return NextResponse.json({ ok: true });
+  }
+
   try {
     const memories = await searchMemories(text);
     const reply = await chat(chatId, text, memories);
