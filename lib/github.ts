@@ -1,13 +1,16 @@
 const GITHUB_API = "https://api.github.com";
 
-async function gh<T>(path: string): Promise<T> {
+async function gh<T>(path: string, init?: { method: string; body: object }): Promise<T> {
   const res = await fetch(`${GITHUB_API}${path}`, {
+    method: init?.method ?? "GET",
     headers: {
       Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
       Accept: "application/vnd.github+json",
       "X-GitHub-Api-Version": "2022-11-28",
       "User-Agent": "RemindMe-bot",
+      ...(init ? { "Content-Type": "application/json" } : {}),
     },
+    body: init ? JSON.stringify(init.body) : undefined,
   });
   if (!res.ok) throw new Error(`GitHub ${res.status}: ${await res.text()}`);
   return res.json();
@@ -45,6 +48,19 @@ export async function recentCommits(days = 7): Promise<CommitSummary[]> {
   }
 
   return commits.sort((a, b) => b.date.localeCompare(a.date));
+}
+
+export async function createIssue(
+  repo: string,
+  title: string,
+  body?: string
+): Promise<{ number: number; url: string }> {
+  const { login } = await gh<{ login: string }>("/user");
+  const issue = await gh<{ number: number; html_url: string }>(
+    `/repos/${login}/${repo}/issues`,
+    { method: "POST", body: { title, body } }
+  );
+  return { number: issue.number, url: issue.html_url };
 }
 
 export interface OpenItem {

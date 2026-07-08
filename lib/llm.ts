@@ -1,5 +1,5 @@
 import { listEvents, createEvent } from "./calendar";
-import { recentCommits, openItems } from "./github";
+import { recentCommits, openItems, createIssue } from "./github";
 import { getWeather } from "./weather";
 import { logHabit, habitSummary } from "./habits";
 import { saveJournal, recentJournal } from "./journal";
@@ -76,6 +76,20 @@ const tools = [
           properties: {
             days: { type: "number", description: "How many days back to look (default: 7)" },
           },
+        },
+      },
+      {
+        name: "create_github_issue",
+        description:
+          "Create an issue in one of Miles's GitHub repos. Use when he asks to file/make/open an issue. Write a clear title and a short useful body from what he described.",
+        parameters: {
+          type: "object",
+          properties: {
+            repo: { type: "string", description: "Repository name, e.g. 'RemindMe'" },
+            title: { type: "string", description: "Issue title" },
+            body: { type: "string", description: "Issue body in GitHub markdown" },
+          },
+          required: ["repo", "title"],
         },
       },
       {
@@ -238,6 +252,14 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
   }
   if (name === "get_habit_summary") {
     return { habits: await habitSummary((args.days as number) ?? 7) };
+  }
+  if (name === "create_github_issue") {
+    const issue = await createIssue(
+      args.repo as string,
+      args.title as string,
+      args.body as string | undefined
+    );
+    return { status: "created", ...issue };
   }
   if (name === "save_journal_entry") {
     await saveJournal(args.content as string);
