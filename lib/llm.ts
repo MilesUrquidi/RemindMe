@@ -1,3 +1,4 @@
+import Anthropic from "@anthropic-ai/sdk";
 import { listEvents, createEvent } from "./calendar";
 import { recentCommits, openItems, createIssue } from "./github";
 import { getWeather } from "./weather";
@@ -5,130 +6,140 @@ import { logHabit, habitSummary } from "./habits";
 import { saveJournal, recentJournal } from "./journal";
 import type { MemoryContext } from "./memory";
 
+// Provider order: Anthropic Haiku (prepaid credits - cheap, better quality) first,
+// then free-tier Gemini when credits run out or Anthropic errors. Prepaid balance
+// is the spend cap: when it hits zero the API errors and Gemini takes over.
+const ANTHROPIC_MODEL = "claude-haiku-4-5";
+const anthropic = new Anthropic();
+
 // Free-tier quotas are per model per day, so a rate-limited primary
 // can fall back to a model with its own separate quota bucket.
 const GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
 const USER_TIMEZONE = "America/Los_Angeles";
 
-// Tools Gemini is allowed to call.
-const tools = [
+// Single source of truth for tool definitions; mapped to each provider's format below.
+const toolDefs = [
   {
-    functionDeclarations: [
-      {
-        name: "list_events",
-        description: "List upcoming events from Miles's Apple Calendar.",
-        parameters: {
-          type: "object",
-          properties: {
-            days: { type: "number", description: "How many days ahead to look (default: 7)" },
-          },
-        },
+    name: "list_events",
+    description: "List upcoming events from Miles's Apple Calendar.",
+    parameters: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "How many days ahead to look (default: 7)" },
       },
-      {
-        name: "create_event",
-        description: "Create a new event in Miles's Apple Calendar.",
-        parameters: {
-          type: "object",
-          properties: {
-            summary: { type: "string", description: "Event title" },
-            start: { type: "string", description: "Start time as ISO 8601 with timezone offset" },
-            end: { type: "string", description: "End time as ISO 8601 with timezone offset" },
-            description: { type: "string", description: "Optional notes for the event" },
-            location: { type: "string", description: "Optional location" },
-          },
-          required: ["summary", "start", "end"],
-        },
+    },
+  },
+  {
+    name: "create_event",
+    description: "Create a new event in Miles's Apple Calendar.",
+    parameters: {
+      type: "object",
+      properties: {
+        summary: { type: "string", description: "Event title" },
+        start: { type: "string", description: "Start time as ISO 8601 with timezone offset" },
+        end: { type: "string", description: "End time as ISO 8601 with timezone offset" },
+        description: { type: "string", description: "Optional notes for the event" },
+        location: { type: "string", description: "Optional location" },
       },
-      {
-        name: "list_recent_commits",
-        description: "List Miles's recent GitHub commits across his repos. Use for questions like 'what did I ship this week'.",
-        parameters: {
-          type: "object",
-          properties: {
-            days: { type: "number", description: "How many days back to look (default: 7)" },
-          },
-        },
+      required: ["summary", "start", "end"],
+    },
+  },
+  {
+    name: "list_recent_commits",
+    description: "List Miles's recent GitHub commits across his repos. Use for questions like 'what did I ship this week'.",
+    parameters: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "How many days back to look (default: 7)" },
       },
-      {
-        name: "list_open_github_items",
-        description: "List open issues and pull requests across Miles's GitHub repos.",
-        parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    name: "list_open_github_items",
+    description: "List open issues and pull requests across Miles's GitHub repos.",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "log_habit",
+    description:
+      "Log that Miles did a habit today. Call whenever he mentions completing gym, leetcode, or personal project work. Use canonical habit names: 'gym', 'leetcode', 'project'.",
+    parameters: {
+      type: "object",
+      properties: {
+        habit: { type: "string", description: "Habit name: gym, leetcode, project, or another short lowercase name" },
+        note: { type: "string", description: "Optional detail, e.g. 'push day' or 'worked on RemindMe'" },
       },
-      {
-        name: "log_habit",
-        description:
-          "Log that Miles did a habit today. Call whenever he mentions completing gym, leetcode, or personal project work. Use canonical habit names: 'gym', 'leetcode', 'project'.",
-        parameters: {
-          type: "object",
-          properties: {
-            habit: { type: "string", description: "Habit name: gym, leetcode, project, or another short lowercase name" },
-            note: { type: "string", description: "Optional detail, e.g. 'push day' or 'worked on RemindMe'" },
-          },
-          required: ["habit"],
-        },
+      required: ["habit"],
+    },
+  },
+  {
+    name: "get_habit_summary",
+    description:
+      "Get counts, active days, and last-done dates for Miles's habits. Use for 'how consistent have I been', streak questions, and accountability nudges.",
+    parameters: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "How many days back to look (default: 7)" },
       },
-      {
-        name: "get_habit_summary",
-        description:
-          "Get counts, active days, and last-done dates for Miles's habits. Use for 'how consistent have I been', streak questions, and accountability nudges.",
-        parameters: {
-          type: "object",
-          properties: {
-            days: { type: "number", description: "How many days back to look (default: 7)" },
-          },
-        },
+    },
+  },
+  {
+    name: "create_github_issue",
+    description:
+      "Create an issue in one of Miles's GitHub repos. Use when he asks to file/make/open an issue. Write a clear title and a short useful body from what he described.",
+    parameters: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repository name, e.g. 'RemindMe'" },
+        title: { type: "string", description: "Issue title" },
+        body: { type: "string", description: "Issue body in GitHub markdown" },
       },
-      {
-        name: "create_github_issue",
-        description:
-          "Create an issue in one of Miles's GitHub repos. Use when he asks to file/make/open an issue. Write a clear title and a short useful body from what he described.",
-        parameters: {
-          type: "object",
-          properties: {
-            repo: { type: "string", description: "Repository name, e.g. 'RemindMe'" },
-            title: { type: "string", description: "Issue title" },
-            body: { type: "string", description: "Issue body in GitHub markdown" },
-          },
-          required: ["repo", "title"],
-        },
+      required: ["repo", "title"],
+    },
+  },
+  {
+    name: "save_journal_entry",
+    description:
+      "Save a journal entry. Call when Miles reflects on his day - especially replies to the evening check-in - or explicitly asks to journal something. Save his reflection in his own words, lightly cleaned up.",
+    parameters: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "The journal entry text" },
       },
-      {
-        name: "save_journal_entry",
-        description:
-          "Save a journal entry. Call when Miles reflects on his day - especially replies to the evening check-in - or explicitly asks to journal something. Save his reflection in his own words, lightly cleaned up.",
-        parameters: {
-          type: "object",
-          properties: {
-            content: { type: "string", description: "The journal entry text" },
-          },
-          required: ["content"],
-        },
+      required: ["content"],
+    },
+  },
+  {
+    name: "get_journal_entries",
+    description: "Get Miles's recent journal entries. Use when he asks what he journaled or how past days went.",
+    parameters: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "How many days back to look (default: 7)" },
       },
-      {
-        name: "get_journal_entries",
-        description: "Get Miles's recent journal entries. Use when he asks what he journaled or how past days went.",
-        parameters: {
-          type: "object",
-          properties: {
-            days: { type: "number", description: "How many days back to look (default: 7)" },
-          },
-        },
+    },
+  },
+  {
+    name: "get_weather",
+    description: "Get current weather and forecast. Defaults to Irvine, CA.",
+    parameters: {
+      type: "object",
+      properties: {
+        days: { type: "number", description: "Forecast days, 1-7 (default: 1)" },
+        location: { type: "string", description: "City name if not Irvine, e.g. 'San Francisco'" },
       },
-      {
-        name: "get_weather",
-        description: "Get current weather and forecast. Defaults to Irvine, CA.",
-        parameters: {
-          type: "object",
-          properties: {
-            days: { type: "number", description: "Forecast days, 1-7 (default: 1)" },
-            location: { type: "string", description: "City name if not Irvine, e.g. 'San Francisco'" },
-          },
-        },
-      },
-    ],
+    },
   },
 ];
+
+const tools = [{ functionDeclarations: toolDefs }];
+
+const anthropicTools: Anthropic.Tool[] = toolDefs.map((t) => ({
+  name: t.name,
+  description: t.description,
+  input_schema: t.parameters as Anthropic.Tool.InputSchema,
+}));
 
 type Part = Record<string, unknown>;
 
@@ -278,19 +289,86 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
   return { error: `unknown tool ${name}` };
 }
 
-// Gemini's turn roles are "user" and "model". Recent messages become real turns;
-// consecutive same-role rows (e.g. cron-sent briefs) are merged so alternation holds,
-// and any leading model turn is dropped since a conversation must start with the user.
-function toTurns(recent: MemoryContext["recent"]): Part[] {
+// Static half of the chat system prompt. Kept separate from the per-message
+// dynamic context (time, memories) so Anthropic can cache it across requests.
+const PERSONA =
+  `You are RemindMe, Miles's personal AI assistant living in his Telegram.\n\n` +
+  `## Who Miles is\n` +
+  `Miles Urquidi is a software engineering student at UC Irvine (UCI). ` +
+  `He prepares for SWE interviews through CodePath and MLT and practices LeetCode regularly. ` +
+  `He works on personal coding projects and goes to the gym. ` +
+  `His goals: land a strong SWE internship, stay consistent with the gym and his projects, become a strong engineer.\n\n` +
+  `## Your role\n` +
+  `You are a full general-purpose assistant. Answer any question from your own knowledge - ` +
+  `coding help, LeetCode problems, system design, interview prep, career advice, explanations, brainstorming, anything. ` +
+  `Tools (calendar) are extras, not your limits: never refuse a question just because no tool covers it. ` +
+  `Only say you can't help when you genuinely can't, e.g. live data no tool covers (news, stock prices). ` +
+  `Beyond that, help Miles stay on track, remember things, and manage his calendar. ` +
+  `Hold him accountable on his habits (gym, leetcode, personal projects): when he mentions completing one, ` +
+  `log it with log_habit and acknowledge briefly. If he asks how he's doing, use get_habit_summary and be honest - ` +
+  `celebrate consistency, call out slumps without nagging. ` +
+  `When he reflects on how his day went (especially in the evening), save it with save_journal_entry in his own words, ` +
+  `and still log any habits he mentions. ` +
+  `Be concise and direct - no unnecessary preamble. ` +
+  `You know his history from past conversations.\n\n` +
+  `## Formatting\n` +
+  `Replies go to Telegram with HTML parse mode. No markdown, no asterisks. ` +
+  `The ONLY allowed tags are <b>, <i>, and <code> - Telegram rejects everything else. ` +
+  `Never use <ul>, <ol>, <li>, <p>, <br>, or headings. For lists, write plain lines starting with "• " or "1." ` +
+  `Escape literal &, <, > as &amp; &lt; &gt;. ` +
+  `When listing calendar events, group by day with a bold day header, ` +
+  `one item per line showing both start and end time, and a blank line between days. Example:\n` +
+  `📅 <b>Tue, Jul 7</b>\n` +
+  `• 9:00 AM - 5:00 PM: Work\n` +
+  `• 6:30 PM - 7:30 PM: Gym\n` +
+  `\n` +
+  `📅 <b>Wed, Jul 8</b>\n` +
+  `• 2:00 PM - 4:00 PM: CodePath session\n` +
+  `Never compute weekdays or times yourself - use the pre-computed "when" field from tool results verbatim.`;
+
+// One-shot compose (no tools) used by the cron briefs: Anthropic first, Gemini fallback.
+async function compose(systemPrompt: string, userText: string): Promise<string> {
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      const response = await anthropic.messages.create({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: [{ role: "user", content: userText }],
+      });
+      const text = response.content.find((b) => b.type === "text");
+      if (response.stop_reason !== "refusal" && text?.type === "text") return text.text;
+    } catch (err) {
+      console.warn("Anthropic compose failed, using Gemini:", err);
+    }
+  }
+
+  const content = await callGemini(
+    systemPrompt,
+    [{ role: "user", parts: [{ text: userText }] }],
+    false
+  );
+  const parts = (content.parts as Part[]) ?? [];
+  return (parts.find((p) => p.text)?.text as string) ?? "(no response)";
+}
+
+// Recent messages become real conversation turns. Consecutive same-role rows
+// (e.g. cron-sent briefs) are merged so alternation holds, and any leading
+// assistant turn is dropped since a conversation must start with the user.
+// Gemini calls the assistant role "model"; Anthropic calls it "assistant".
+function toTurns(
+  recent: MemoryContext["recent"],
+  assistantRole: "model" | "assistant"
+): { role: string; text: string }[] {
   const turns: { role: string; texts: string[] }[] = [];
   for (const m of recent) {
-    const role = m.role === "assistant" ? "model" : "user";
+    const role = m.role === "assistant" ? assistantRole : "user";
     const last = turns[turns.length - 1];
     if (last && last.role === role) last.texts.push(m.content);
     else turns.push({ role, texts: [m.content] });
   }
-  while (turns.length && turns[0].role === "model") turns.shift();
-  return turns.map((t) => ({ role: t.role, parts: [{ text: t.texts.join("\n") }] }));
+  while (turns.length && turns[0].role === assistantRole) turns.shift();
+  return turns.map((t) => ({ role: t.role, text: t.texts.join("\n") }));
 }
 
 export async function chat(
@@ -312,46 +390,94 @@ export async function chat(
     hour: "numeric",
     minute: "2-digit",
   });
-  const systemPrompt =
-    `You are RemindMe, Miles's personal AI assistant living in his Telegram.\n\n` +
-    `## Who Miles is\n` +
-    `Miles Urquidi is a software engineering student at UC Irvine (UCI). ` +
-    `He prepares for SWE interviews through CodePath and MLT and practices LeetCode regularly. ` +
-    `He works on personal coding projects and goes to the gym. ` +
-    `His goals: land a strong SWE internship, stay consistent with the gym and his projects, become a strong engineer.\n\n` +
-    `## Your role\n` +
-    `You are a full general-purpose assistant. Answer any question from your own knowledge - ` +
-    `coding help, LeetCode problems, system design, interview prep, career advice, explanations, brainstorming, anything. ` +
-    `Tools (calendar) are extras, not your limits: never refuse a question just because no tool covers it. ` +
-    `Only say you can't help when you genuinely can't, e.g. live data no tool covers (news, stock prices). ` +
-    `Beyond that, help Miles stay on track, remember things, and manage his calendar. ` +
-    `Hold him accountable on his habits (gym, leetcode, personal projects): when he mentions completing one, ` +
-    `log it with log_habit and acknowledge briefly. If he asks how he's doing, use get_habit_summary and be honest - ` +
-    `celebrate consistency, call out slumps without nagging. ` +
-    `When he reflects on how his day went (especially in the evening), save it with save_journal_entry in his own words, ` +
-    `and still log any habits he mentions. ` +
-    `Be concise and direct - no unnecessary preamble. ` +
-    `You know his history from past conversations.\n\n` +
-    `## Formatting\n` +
-    `Replies go to Telegram with HTML parse mode. No markdown, no asterisks. ` +
-    `The ONLY allowed tags are <b>, <i>, and <code> - Telegram rejects everything else. ` +
-    `Never use <ul>, <ol>, <li>, <p>, <br>, or headings. For lists, write plain lines starting with "• " or "1." ` +
-    `Escape literal &, <, > as &amp; &lt; &gt;. ` +
-    `When listing calendar events, group by day with a bold day header, ` +
-    `one item per line showing both start and end time, and a blank line between days. Example:\n` +
-    `📅 <b>Tue, Jul 7</b>\n` +
-    `• 9:00 AM - 5:00 PM: Work\n` +
-    `• 6:30 PM - 7:30 PM: Gym\n` +
-    `\n` +
-    `📅 <b>Wed, Jul 8</b>\n` +
-    `• 2:00 PM - 4:00 PM: CodePath session\n` +
-    `Never compute weekdays or times yourself - use the pre-computed "when" field from tool results verbatim.\n\n` +
+  const dynamicContext =
     `The current time is ${now} (${USER_TIMEZONE}). When Miles asks to schedule something, call create_event ` +
     `with absolute ISO 8601 times in his timezone. Resolve relative times like "tomorrow at 9am" ` +
     `against the current time above.${contextBlock}`;
 
+  if (process.env.ANTHROPIC_API_KEY) {
+    try {
+      return await chatAnthropic(dynamicContext, memories.recent, userMessage);
+    } catch (err) {
+      if (!(err instanceof AnthropicUnavailable)) throw err;
+      console.warn("Anthropic unavailable, using Gemini:", err.message);
+    }
+  }
+  return chatGemini(`${PERSONA}\n\n${dynamicContext}`, memories.recent, userMessage);
+}
+
+// Thrown only when no side-effecting tool has run yet, so retrying the whole
+// conversation on Gemini is safe (no duplicate events/issues).
+class AnthropicUnavailable extends Error {}
+
+async function chatAnthropic(
+  dynamicContext: string,
+  recent: MemoryContext["recent"],
+  userMessage: string
+): Promise<string> {
+  const messages: Anthropic.MessageParam[] = [
+    ...toTurns(recent, "assistant").map((t) => ({
+      role: t.role as "user" | "assistant",
+      content: t.text,
+    })),
+    { role: "user", content: userMessage },
+  ];
+
+  let toolsRan = false;
+  try {
+    // Allow up to 3 tool round-trips before giving up.
+    for (let i = 0; i < 3; i++) {
+      const response = await anthropic.messages.create({
+        model: ANTHROPIC_MODEL,
+        max_tokens: 2048,
+        system: [
+          // Static persona is cached (90% cheaper on reads); dynamic time/memory context stays out.
+          { type: "text", text: PERSONA, cache_control: { type: "ephemeral" } },
+          { type: "text", text: dynamicContext },
+        ],
+        tools: anthropicTools,
+        messages,
+      });
+
+      if (response.stop_reason === "refusal") {
+        return "I'm not able to help with that.";
+      }
+
+      if (response.stop_reason === "tool_use") {
+        messages.push({ role: "assistant", content: response.content });
+        const results: Anthropic.ToolResultBlockParam[] = [];
+        for (const block of response.content) {
+          if (block.type === "tool_use") {
+            toolsRan = true;
+            const result = await runTool(block.name, block.input as Record<string, unknown>);
+            results.push({
+              type: "tool_result",
+              tool_use_id: block.id,
+              content: JSON.stringify(result),
+            });
+          }
+        }
+        messages.push({ role: "user", content: results });
+        continue;
+      }
+
+      const text = response.content.find((b) => b.type === "text");
+      return text?.type === "text" ? text.text : "(no response)";
+    }
+    return "Done.";
+  } catch (err) {
+    if (toolsRan) throw err;
+    throw new AnthropicUnavailable(err instanceof Error ? err.message : String(err));
+  }
+}
+
+async function chatGemini(
+  systemPrompt: string,
+  recent: MemoryContext["recent"],
+  userMessage: string
+): Promise<string> {
   const contents: Part[] = [
-    ...toTurns(memories.recent),
+    ...toTurns(recent, "model").map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
     { role: "user", parts: [{ text: userMessage }] },
   ];
 
@@ -418,27 +544,13 @@ export async function dailySummary(memories: MemoryContext): Promise<string> {
     `Formatting: Telegram HTML. Only <b>, <i>, <code> tags. No markdown, no asterisks, no <ul>/<li>. ` +
     `Blank line between sections. Keep the whole thing compact - it's a morning text, not a report.`;
 
-  const content = await callGemini(
+  return compose(
     systemPrompt,
-    [
-      {
-        role: "user",
-        parts: [
-          {
-            text:
-              `Today's calendar: ${eventsBlock}\n\n` +
-              `Weather data: ${JSON.stringify(weather)}\n\n` +
-              `Habit summary (last 7 days): ${JSON.stringify(habits)}\n\n` +
-              `Recent conversation history:\n${historyBlock}`,
-          },
-        ],
-      },
-    ],
-    false
+    `Today's calendar: ${eventsBlock}\n\n` +
+      `Weather data: ${JSON.stringify(weather)}\n\n` +
+      `Habit summary (last 7 days): ${JSON.stringify(habits)}\n\n` +
+      `Recent conversation history:\n${historyBlock}`
   );
-
-  const parts = (content.parts as Part[]) ?? [];
-  return (parts.find((p) => p.text)?.text as string) ?? "(no response)";
 }
 
 export async function weeklySummary(): Promise<string> {
@@ -473,27 +585,13 @@ export async function weeklySummary(): Promise<string> {
     `Use "• " for list lines and blank lines between sections. Compact but warmer than the daily texts - ` +
     `it's the one message of the week that zooms out.`;
 
-  const content = await callGemini(
+  return compose(
     systemPrompt,
-    [
-      {
-        role: "user",
-        parts: [
-          {
-            text:
-              `Habits last 7 days: ${JSON.stringify(habits)}\n\n` +
-              `Habits last 14 days (for week-over-week comparison): ${JSON.stringify(prevHabits)}\n\n` +
-              `Journal entries this week: ${JSON.stringify(journal)}\n\n` +
-              `Commits this week: ${JSON.stringify(commits)}`,
-          },
-        ],
-      },
-    ],
-    false
+    `Habits last 7 days: ${JSON.stringify(habits)}\n\n` +
+      `Habits last 14 days (for week-over-week comparison): ${JSON.stringify(prevHabits)}\n\n` +
+      `Journal entries this week: ${JSON.stringify(journal)}\n\n` +
+      `Commits this week: ${JSON.stringify(commits)}`
   );
-
-  const parts = (content.parts as Part[]) ?? [];
-  return (parts.find((p) => p.text)?.text as string) ?? "(no response)";
 }
 
 export async function eveningSummary(): Promise<string> {
@@ -523,24 +621,10 @@ export async function eveningSummary(): Promise<string> {
     `Formatting: Telegram HTML. Only <b>, <i>, <code> tags. No markdown, no <ul>/<li>. ` +
     `Use "• " for list lines and blank lines between sections. Keep it short - a nightly text, not a report.`;
 
-  const content = await callGemini(
+  return compose(
     systemPrompt,
-    [
-      {
-        role: "user",
-        parts: [
-          {
-            text:
-              `Habits logged today: ${JSON.stringify(habits)}\n\n` +
-              `Commits today: ${JSON.stringify(commits)}\n\n` +
-              `Today's calendar was: ${JSON.stringify(events)}`,
-          },
-        ],
-      },
-    ],
-    false
+    `Habits logged today: ${JSON.stringify(habits)}\n\n` +
+      `Commits today: ${JSON.stringify(commits)}\n\n` +
+      `Today's calendar was: ${JSON.stringify(events)}`
   );
-
-  const parts = (content.parts as Part[]) ?? [];
-  return (parts.find((p) => p.text)?.text as string) ?? "(no response)";
 }
