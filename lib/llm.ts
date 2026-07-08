@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { createReminder, listReminders, cancelReminder } from "./reminders";
 import { listEvents, createEvent } from "./calendar";
 import { recentCommits, openItems, createIssue } from "./github";
 import { getWeather } from "./weather";
@@ -20,6 +21,39 @@ const USER_TIMEZONE = "America/Los_Angeles";
 
 // Single source of truth for tool definitions; mapped to each provider's format below.
 const toolDefs = [
+  {
+    name: "create_reminder",
+    description:
+      "Schedule a one-off reminder that will be texted to Miles at the given time. Use when he says 'remind me to X at/in Y'.",
+    parameters: {
+      type: "object",
+      properties: {
+        content: { type: "string", description: "What to remind him about" },
+        due_at: {
+          type: "string",
+          description: "When to fire, as an absolute ISO 8601 timestamp with timezone offset",
+        },
+      },
+      required: ["content", "due_at"],
+    },
+  },
+  {
+    name: "list_reminders",
+    description: "List Miles's pending reminders (includes each reminder's id).",
+    parameters: { type: "object", properties: {} },
+  },
+  {
+    name: "cancel_reminder",
+    description:
+      "Cancel a pending reminder by id. If unsure which one Miles means, call list_reminders first.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "number", description: "The reminder id to cancel" },
+      },
+      required: ["id"],
+    },
+  },
   {
     name: "list_events",
     description: "List upcoming events from Miles's Apple Calendar.",
@@ -234,7 +268,22 @@ function formatEventTime(start: string, end: string): string {
     : `${dayPart}, ${startClock}`;
 }
 
-async function runTool(name: string, args: Record<string, unknown>): Promise<object> {
+async function runTool(
+  chatId: number,
+  name: string,
+  args: Record<string, unknown>
+): Promise<object> {
+  if (name === "create_reminder") {
+    await createReminder(chatId, args.content as string, args.due_at as string);
+    return { status: "scheduled", content: args.content, due_at: args.due_at };
+  }
+  if (name === "list_reminders") {
+    return { reminders: await listReminders(chatId) };
+  }
+  if (name === "cancel_reminder") {
+    const cancelled = await cancelReminder(chatId, args.id as number);
+    return cancelled ? { status: "cancelled", id: args.id } : { error: `no pending reminder with id ${args.id}` };
+  }
   if (name === "list_events") {
     const events = await listEvents((args.days as number) ?? 7);
     return {
@@ -391,19 +440,19 @@ export async function chat(
     minute: "2-digit",
   });
   const dynamicContext =
-    `The current time is ${now} (${USER_TIMEZONE}). When Miles asks to schedule something, call create_event ` +
-    `with absolute ISO 8601 times in his timezone. Resolve relative times like "tomorrow at 9am" ` +
-    `against the current time above.${contextBlock}`;
+    `The current time is ${now} (${USER_TIMEZONE}). When Miles asks to be reminded of something, call create_reminder; ` +
+    `when he asks to put something on his calendar, call create_event. Both take absolute ISO 8601 times in his ` +
+    `timezone - resolve relative times like "in 20 minutes" or "tomorrow at 9am" against the current time above.${contextBlock}`;
 
   if (process.env.ANTHROPIC_API_KEY) {
     try {
-      return await chatAnthropic(dynamicContext, memories.recent, userMessage);
+      return await chatAnthropic(chatId, dynamicContext, memories.recent, userMessage);
     } catch (err) {
       if (!(err instanceof AnthropicUnavailable)) throw err;
       console.warn("Anthropic unavailable, using Gemini:", err.message);
     }
   }
-  return chatGemini(`${PERSONA}\n\n${dynamicContext}`, memories.recent, userMessage);
+  return chatGemini(chatId, `${PERSONA}\n\n${dynamicContext}`, memories.recent, userMessage);
 }
 
 // Thrown only when no side-effecting tool has run yet, so retrying the whole
@@ -411,6 +460,7 @@ export async function chat(
 class AnthropicUnavailable extends Error {}
 
 async function chatAnthropic(
+  chatId: number,
   dynamicContext: string,
   recent: MemoryContext["recent"],
   userMessage: string
@@ -449,7 +499,7 @@ async function chatAnthropic(
         for (const block of response.content) {
           if (block.type === "tool_use") {
             toolsRan = true;
-            const result = await runTool(block.name, block.input as Record<string, unknown>);
+            const result = await runTool(chatId, block.name, block.input as Record<string, unknown>);
             results.push({
               type: "tool_result",
               tool_use_id: block.id,
@@ -472,6 +522,7 @@ async function chatAnthropic(
 }
 
 async function chatGemini(
+  chatId: number,
   systemPrompt: string,
   recent: MemoryContext["recent"],
   userMessage: string
@@ -494,7 +545,7 @@ async function chatGemini(
       return text ?? "(no response)";
     }
 
-    const result = await runTool(fnCall.name, fnCall.args ?? {});
+    const result = await runTool(chatId, fnCall.name, fnCall.args ?? {});
     contents.push(content);
     contents.push({
       role: "user",

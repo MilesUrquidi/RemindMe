@@ -16,7 +16,8 @@ For full history, design decisions, and agent lessons, read the Obsidian note:
 - Chat with long-term memory: every message embedded (`gemini-embedding-001`, 1536 dims) into Supabase pgvector; retrieval = semantic matches + recent messages.
 - Tools via Gemini function calling: Apple Calendar (read/create), GitHub (commits, open issues/PRs), weather (Open-Meteo), habit log/summary (gym, leetcode, project), journal save/read.
 - 8am PT morning brief cron: calendar (or suggestions), weather with emoji, habit accountability.
-- 9pm PT evening check-in cron: day recap + reflective question; Miles's reply is saved as a journal entry.
+- 9pm PT evening check-in cron: day recap + reflective question; Miles's reply is saved as a journal entry. Sundays it becomes the weekly review (`?weekly=1` forces it).
+- One-off reminders ("remind me to X in 20 min"): create/list/cancel tools; fired by `/api/cron/reminders`, pinged every minute by cron-job.org (restored 2026-07-08 as the wedge feature for a future multi-user version).
 
 ## Architecture
 
