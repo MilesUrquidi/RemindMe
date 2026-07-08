@@ -17,7 +17,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
+  // Telegram's typing indicator expires after ~5s; replies take longer,
+  // so keep re-firing it until the reply is out.
   sendTyping(chatId);
+  const typing = setInterval(() => sendTyping(chatId), 4000);
 
   try {
     const memories = await searchMemories(text);
@@ -33,6 +36,8 @@ export async function POST(req: NextRequest) {
     // which would hammer the already-failing (often rate-limited) LLM call.
     console.error("telegram webhook failed:", err);
     await sendMessage(chatId, "Something went wrong on my end (probably a rate limit). Try again in a minute.");
+  } finally {
+    clearInterval(typing);
   }
 
   return NextResponse.json({ ok: true });
