@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { parseUpdate, sendMessage } from "@/lib/telegram";
+import { parseUpdate, sendMessage, sendTyping } from "@/lib/telegram";
 import { searchMemories, storeMemory } from "@/lib/memory";
 import { chat } from "@/lib/llm";
 
@@ -16,6 +16,8 @@ export async function POST(req: NextRequest) {
   if (String(chatId) !== process.env.TELEGRAM_CHAT_ID) {
     return NextResponse.json({ ok: true });
   }
+
+  sendTyping(chatId);
 
   try {
     const memories = await searchMemories(text);

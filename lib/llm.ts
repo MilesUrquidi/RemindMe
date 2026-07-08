@@ -3,6 +3,7 @@ import { recentCommits, openItems, createIssue } from "./github";
 import { getWeather } from "./weather";
 import { logHabit, habitSummary } from "./habits";
 import { saveJournal, recentJournal } from "./journal";
+import type { MemoryContext } from "./memory";
 
 // Free-tier quotas are per model per day, so a rate-limited primary
 // can fall back to a model with its own separate quota bucket.
@@ -277,13 +278,29 @@ async function runTool(name: string, args: Record<string, unknown>): Promise<obj
   return { error: `unknown tool ${name}` };
 }
 
+// Gemini's turn roles are "user" and "model". Recent messages become real turns;
+// consecutive same-role rows (e.g. cron-sent briefs) are merged so alternation holds,
+// and any leading model turn is dropped since a conversation must start with the user.
+function toTurns(recent: MemoryContext["recent"]): Part[] {
+  const turns: { role: string; texts: string[] }[] = [];
+  for (const m of recent) {
+    const role = m.role === "assistant" ? "model" : "user";
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) last.texts.push(m.content);
+    else turns.push({ role, texts: [m.content] });
+  }
+  while (turns.length && turns[0].role === "model") turns.shift();
+  return turns.map((t) => ({ role: t.role, parts: [{ text: t.texts.join("\n") }] }));
+}
+
 export async function chat(
   chatId: number,
   userMessage: string,
-  memories: { role: string; content: string }[]
+  memories: MemoryContext
 ): Promise<string> {
-  const contextBlock = memories.length
-    ? `\n\nRecent conversation history:\n${memories.map((m) => `${m.role}: ${m.content}`).join("\n")}`
+  const contextBlock = memories.relevant.length
+    ? `\n\nPossibly relevant memories from past conversations (may be old - trust the live conversation over these):\n` +
+      memories.relevant.map((m) => `${m.role}: ${m.content}`).join("\n")
     : "";
 
   const now = new Date().toLocaleString("en-US", {
@@ -333,7 +350,10 @@ export async function chat(
     `with absolute ISO 8601 times in his timezone. Resolve relative times like "tomorrow at 9am" ` +
     `against the current time above.${contextBlock}`;
 
-  const contents: Part[] = [{ role: "user", parts: [{ text: userMessage }] }];
+  const contents: Part[] = [
+    ...toTurns(memories.recent),
+    { role: "user", parts: [{ text: userMessage }] },
+  ];
 
   // Allow up to 3 tool round-trips before giving up.
   for (let i = 0; i < 3; i++) {
@@ -359,9 +379,7 @@ export async function chat(
   return "Done.";
 }
 
-export async function dailySummary(
-  memories: { role: string; content: string }[]
-): Promise<string> {
+export async function dailySummary(memories: MemoryContext): Promise<string> {
   // Gather everything in code so the brief is one deterministic compose call.
   // Each source degrades to a note instead of killing the whole brief.
   const [events, weather, habits] = await Promise.all([
@@ -376,7 +394,7 @@ export async function dailySummary(
       : events.length
         ? JSON.stringify(events.map((e) => ({ ...e, when: formatEventTime(e.start, e.end) })))
         : "no events today";
-  const historyBlock = memories.map((m) => `${m.role}: ${m.content}`).join("\n");
+  const historyBlock = memories.recent.map((m) => `${m.role}: ${m.content}`).join("\n");
 
   const now = new Date().toLocaleString("en-US", {
     timeZone: USER_TIMEZONE,
@@ -412,6 +430,61 @@ export async function dailySummary(
               `Weather data: ${JSON.stringify(weather)}\n\n` +
               `Habit summary (last 7 days): ${JSON.stringify(habits)}\n\n` +
               `Recent conversation history:\n${historyBlock}`,
+          },
+        ],
+      },
+    ],
+    false
+  );
+
+  const parts = (content.parts as Part[]) ?? [];
+  return (parts.find((p) => p.text)?.text as string) ?? "(no response)";
+}
+
+export async function weeklySummary(): Promise<string> {
+  const [habits, prevHabits, journal, commits] = await Promise.all([
+    habitSummary(7).catch(() => "unavailable" as const),
+    habitSummary(14).catch(() => "unavailable" as const),
+    recentJournal(7).catch(() => "unavailable" as const),
+    recentCommits(7).catch(() => "unavailable" as const),
+  ]);
+
+  const now = new Date().toLocaleString("en-US", {
+    timeZone: USER_TIMEZONE,
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
+
+  const systemPrompt =
+    `You are RemindMe, Miles's personal AI assistant. It's Sunday evening (${now}) - compose his weekly review, ` +
+    `which replaces tonight's regular check-in.\n\n` +
+    `Structure:\n` +
+    `1. Short greeting acknowledging the week is wrapping up.\n` +
+    `2. 💪 <b>Habits</b> - this week's consistency per habit (days active out of 7). The 14-day data minus ` +
+    `the 7-day data is last week's baseline: say whether he's trending up or down, honestly.\n` +
+    `3. 🚢 <b>Shipped</b> - what he committed this week, grouped by repo, one line each. Skip if no commits.\n` +
+    `4. 📓 <b>Reflections</b> - 1-2 themes from his journal entries this week, in a sentence or two. ` +
+    `Quote a short phrase of his own words if one stands out. Skip if no entries.\n` +
+    `5. 🎯 One suggested focus for next week, grounded in the data (weakest habit, stalled project, ` +
+    `or something he said he wanted to do).\n` +
+    `6. End with one reflective question about the week overall - his answer becomes a journal entry.\n\n` +
+    `Formatting: Telegram HTML. Only <b>, <i>, <code> tags. No markdown, no <ul>/<li>. ` +
+    `Use "• " for list lines and blank lines between sections. Compact but warmer than the daily texts - ` +
+    `it's the one message of the week that zooms out.`;
+
+  const content = await callGemini(
+    systemPrompt,
+    [
+      {
+        role: "user",
+        parts: [
+          {
+            text:
+              `Habits last 7 days: ${JSON.stringify(habits)}\n\n` +
+              `Habits last 14 days (for week-over-week comparison): ${JSON.stringify(prevHabits)}\n\n` +
+              `Journal entries this week: ${JSON.stringify(journal)}\n\n` +
+              `Commits this week: ${JSON.stringify(commits)}`,
           },
         ],
       },

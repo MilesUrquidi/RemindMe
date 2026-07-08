@@ -16,6 +16,16 @@ function sanitizeTelegramHtml(text: string): string {
     .trim();
 }
 
+// Shows "typing…" in the chat for ~5s or until the next message arrives.
+// Fire-and-forget: a failed indicator should never block the reply.
+export function sendTyping(chatId: string | number) {
+  fetch(`${TELEGRAM_API}/sendChatAction`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, action: "typing" }),
+  }).catch(() => {});
+}
+
 export async function sendMessage(chatId: string | number, text: string) {
   const clean = sanitizeTelegramHtml(text);
   const res = await fetch(`${TELEGRAM_API}/sendMessage`, {

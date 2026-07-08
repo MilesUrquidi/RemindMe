@@ -38,38 +38,51 @@ export async function storeMemory(role: "user" | "assistant", content: string) {
   await supabase.from("memories").insert({ role, content, embedding });
 }
 
+export interface Memory {
+  role: string;
+  content: string;
+}
+
+export interface MemoryContext {
+  /** Last messages in chronological order - sent to the model as real conversation turns. */
+  recent: Memory[];
+  /** Semantic matches from further back, deduped against recent - injected as system context. */
+  relevant: Memory[];
+}
+
 export async function searchMemories(
   query: string,
-  limit = 5
-): Promise<{ role: string; content: string }[]> {
+  recentLimit = 8,
+  relevantLimit = 4
+): Promise<MemoryContext> {
   const [embedding, recentRes] = await Promise.all([
     query.trim() ? embed(query) : Promise.resolve(null),
     supabase
       .from("memories")
       .select("role, content")
       .order("created_at", { ascending: false })
-      .limit(limit),
+      .limit(recentLimit),
   ]);
 
   // Oldest-first so the conversation reads chronologically.
   const recent = (recentRes.data ?? []).reverse();
 
-  if (!embedding) return recent;
+  if (!embedding) return { recent, relevant: [] };
 
-  const { data: relevant, error } = await supabase.rpc("match_memories", {
+  const { data: matches, error } = await supabase.rpc("match_memories", {
     query_embedding: embedding,
-    match_count: limit,
+    match_count: relevantLimit + recentLimit,
   });
   if (error) {
     console.error("match_memories failed:", error);
-    return recent;
+    return { recent, relevant: [] };
   }
 
-  // Semantically relevant memories first, then recent context; dedupe by content.
   const seen = new Set(recent.map((m) => m.content));
-  const merged = (relevant ?? [])
+  const relevant = (matches ?? [])
     .filter((m: { content: string }) => !seen.has(m.content))
-    .map((m: { role: string; content: string }) => ({ role: m.role, content: m.content }));
+    .slice(0, relevantLimit)
+    .map((m: Memory) => ({ role: m.role, content: m.content }));
 
-  return [...merged, ...recent];
+  return { recent, relevant };
 }

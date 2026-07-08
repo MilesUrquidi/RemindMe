@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eveningSummary } from "@/lib/llm";
+import { eveningSummary, weeklySummary } from "@/lib/llm";
 import { storeMemory } from "@/lib/memory";
 import { sendMessage } from "@/lib/telegram";
 
@@ -10,7 +10,15 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
   }
 
-  const message = await eveningSummary();
+  // Sunday's check-in zooms out into the weekly review (Hobby allows only 2 crons,
+  // so this shares the 9pm slot). `?weekly=1` forces it for manual runs/testing.
+  const laWeekday = new Date().toLocaleDateString("en-US", {
+    weekday: "short",
+    timeZone: "America/Los_Angeles",
+  });
+  const isWeekly = laWeekday === "Sun" || req.nextUrl.searchParams.get("weekly") === "1";
+
+  const message = isWeekly ? await weeklySummary() : await eveningSummary();
   // Store it so Miles's reply lands in a conversation the bot remembers starting.
   await Promise.all([
     storeMemory("assistant", message),
